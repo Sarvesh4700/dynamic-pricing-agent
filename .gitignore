@@ -233,3 +233,14 @@ data/processed/
 
 # Trained model artifacts
 models/
+
+# Local environment / secrets (never commit)
+.env
+.env.local
+.env.*.local
+
+# Audit trail database
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/audit.db

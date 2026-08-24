@@ -23,3 +23,5 @@ seaborn==0.13.2
 six==1.17.0
 threadpoolctl==3.6.0
 tzdata==2026.3
+anthropic>=0.40.0
+python-dotenv>=1.0.1
