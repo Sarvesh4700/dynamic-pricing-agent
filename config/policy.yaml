@@ -1,0 +1,43 @@
+# config/policy.yaml
+#
+# Dynamic Pricing Agent - Policy Engine Configuration
+#
+# All thresholds the policy engine enforces at checkout time live here.
+# src/policy_engine.py loads these values at runtime and never hardcodes them,
+# so a merchant's risk appetite can be tuned without touching code.
+
+# Hard ceiling on any discount the engine will ever consider. The candidate
+# discount levels themselves are fixed at 0/5/10/15 (matching the T-learner's
+# treatment arms in src/uplift_model.py) — this setting can only ever narrow
+# that set further, never widen it.
+max_discount_percent: 15
+
+# A discount is only economically eligible if the merchant's margin AFTER
+# applying it still clears this floor, expressed as a percentage of cart
+# value. Uses the exact profit definition from src/eda.py / src/uplift_model.py:
+# profit_if_converted = price_after_discount - cost, cost = cart_value * (1 - margin).
+minimum_profit_margin_percent: 5
+
+# A positive discount must lift predicted conversion probability by at least
+# this many percentage points over 0% to be considered worth offering.
+# 0% is exempt — it never needs to justify itself with uplift.
+minimum_uplift: 0.03
+
+# If a customer has already received this many discounts within the cooldown
+# window below, no new discount is approved this checkout (0% still is).
+max_discounts_per_customer: 2
+discount_cooldown_days: 7
+
+# Discounts at or below this level can be auto-approved. Anything above it
+# is still returned as the recommended discount, but flagged for a human to
+# sign off on before it's actually applied.
+human_approval_threshold_percent: 10
+
+# What the engine falls back to if the pricing model is unavailable, missing,
+# or returns invalid output. The checkout must never fail because of this —
+# it just proceeds with no discount.
+fallback_discount_percent: 0
+
+# Bumped whenever the rules in this file or policy_engine.py's decision logic
+# change, so the audit trail can tell which policy version made a given call.
+policy_version: "1.0.0"
