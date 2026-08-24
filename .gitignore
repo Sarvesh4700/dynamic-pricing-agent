@@ -219,3 +219,14 @@ __marimo__/
 
 # Generated synthetic datasets
 data/raw/*.csv
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Generated synthetic datasets
+data/raw/*.csv
+
+# Generated EDA outputs
+data/processed/eda/
