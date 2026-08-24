@@ -228,5 +228,8 @@ __pycache__/
 # Generated synthetic datasets
 data/raw/*.csv
 
-# Generated EDA outputs
-data/processed/eda/
+# Generated EDA and uplift outputs
+data/processed/
+
+# Trained model artifacts
+models/
