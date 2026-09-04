@@ -330,7 +330,7 @@ def test_pricing_with_real_pipeline(client):
     response = client.post("/api/pricing", json=VALID_CHECKOUT)
     assert response.status_code == 200
     body = response.json()
-    assert body["approved_discount_percent"] in (0, 5, 10, 15)
+    assert 0 <= body["approved_discount_percent"] <= 15
     assert body["final_price"] <= body["cart_value"]
     expected = round(1850.0 * (1 - body["approved_discount_percent"] / 100.0), 2)
     assert abs(body["final_price"] - expected) < 0.01

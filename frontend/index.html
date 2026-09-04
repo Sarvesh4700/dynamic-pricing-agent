@@ -1,133 +1,692 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Dynamic Pricing Demo</title>
-<style>
-  :root { color-scheme: light; }
-  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-         margin: 0; padding: 2rem 1rem; background: #f5f7fa; color: #1a202c; }
-  main { max-width: 860px; margin: 0 auto; }
-  .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px;
-          padding: 1.25rem 1.5rem; margin-bottom: 1.25rem; }
-  h1 { font-size: 1.5rem; margin: 0 0 .25rem; }
-  h2 { font-size: 1.05rem; margin: 0 0 .75rem; color: #2d3748; }
-  .muted { color: #718096; font-size: .875rem; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: .75rem; }
-  label { display: block; font-size: .78rem; text-transform: uppercase;
-          letter-spacing: .03em; color: #4a5568; margin-bottom: .2rem; }
-  input, select { width: 100%; padding: .45rem .55rem; border: 1px solid #cbd5e0;
-                  border-radius: 6px; font-size: .9rem; box-sizing: border-box; }
-  button { background: #2b6cb0; color: #fff; border: 0; border-radius: 6px;
-           padding: .7rem 1.2rem; font-size: 1rem; cursor: pointer; }
-  button:disabled { background: #a0aec0; cursor: not-allowed; }
-  button.pay { background: #2f855a; }
-  .row { display: flex; justify-content: space-between; padding: .35rem 0;
-         border-bottom: 1px dashed #e2e8f0; }
-  .row:last-child { border-bottom: 0; }
-  .big { font-size: 1.4rem; font-weight: 700; color: #22543d; }
-  .strike { text-decoration: line-through; color: #a0aec0; }
-  .hidden { display: none; }
-  .ok { color: #22543d; } .bad { color: #c53030; } .warn { color: #b7791f; }
-  pre { background: #1a202c; color: #e2e8f0; padding: .75rem; border-radius: 6px;
-        overflow-x: auto; font-size: .75rem; }
-  .tamper { font-size: .8rem; color: #b7791f; margin-top: .75rem; }
-  .tamper input { width: auto; margin-right: .4rem; }
-</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Dynamic Pricing Demo</title>
+
+    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            font-family: Arial, Helvetica, sans-serif;
+            background: #f4f6f9;
+            color: #172033;
+        }
+
+        .container {
+            width: min(1100px, 94%);
+            margin: 28px auto 60px;
+        }
+
+        .card {
+            background: white;
+            border: 1px solid #dfe5ec;
+            border-radius: 10px;
+            padding: 22px;
+            margin-bottom: 20px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+        }
+
+        h1 {
+            margin: 0 0 12px;
+            font-size: 27px;
+        }
+
+        h2 {
+            margin: 0 0 18px;
+            font-size: 18px;
+        }
+
+        p {
+            color: #61708a;
+            line-height: 1.5;
+        }
+
+        .subtitle {
+            margin: 0;
+            font-size: 14px;
+        }
+
+        .mode-box {
+            background: #f7f9fc;
+            border: 1px solid #dfe5ec;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 20px;
+        }
+
+        .mode-row {
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .radio-label {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .dataset-controls {
+            margin-top: 15px;
+            display: none;
+        }
+
+        .dataset-controls.visible {
+            display: block;
+        }
+
+        .file-row {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-bottom: 12px;
+        }
+
+        .file-status {
+            color: #61708a;
+            font-size: 13px;
+        }
+
+        .row-controls {
+            display: flex;
+            gap: 12px;
+            align-items: end;
+            flex-wrap: wrap;
+        }
+
+        .row-number {
+            width: 150px;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px 12px;
+        }
+
+        .field {
+            min-width: 0;
+        }
+
+        label {
+            display: block;
+            font-size: 12px;
+            color: #52627a;
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+
+        input,
+        select {
+            width: 100%;
+            height: 38px;
+            padding: 8px 10px;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            background: white;
+            color: #172033;
+            font-size: 14px;
+        }
+
+        input:focus,
+        select:focus {
+            outline: none;
+            border-color: #2878c8;
+            box-shadow: 0 0 0 2px rgba(40, 120, 200, 0.12);
+        }
+
+        input:disabled,
+        select:disabled {
+            background: #f1f4f8;
+            color: #7a8799;
+        }
+
+        .security-demo {
+            margin-top: 18px;
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            font-size: 13px;
+            color: #52627a;
+        }
+
+        .security-demo input {
+            width: auto;
+            height: auto;
+        }
+
+        button {
+            border: none;
+            border-radius: 6px;
+            padding: 11px 18px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .primary {
+            background: #2878c8;
+            color: white;
+        }
+
+        .primary:hover {
+            background: #2069b3;
+        }
+
+        .secondary {
+            background: #e9eef5;
+            color: #26364d;
+        }
+
+        .secondary:hover {
+            background: #dde5ef;
+        }
+
+        .pay-button {
+            background: #24905a;
+            color: white;
+            font-size: 15px;
+        }
+
+        .pay-button:hover {
+            background: #1d7c4d;
+        }
+
+        button:disabled {
+            opacity: 0.55;
+            cursor: not-allowed;
+        }
+
+        .actions {
+            margin-top: 22px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .result {
+            display: none;
+        }
+
+        .result.visible {
+            display: block;
+        }
+
+        .result-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 20px;
+            padding: 10px 0;
+            border-bottom: 1px dashed #dce2ea;
+        }
+
+        .result-row:last-of-type {
+            border-bottom: none;
+        }
+
+        .result-label {
+            color: #52627a;
+        }
+
+        .result-value {
+            font-weight: 500;
+            text-align: right;
+        }
+
+        .final-price {
+            font-size: 22px;
+            font-weight: 700;
+            color: #16613e;
+        }
+
+        .approved {
+            color: #167348;
+            font-weight: 700;
+        }
+
+        .pending {
+            color: #a56600;
+            font-weight: 700;
+        }
+
+        .rejected {
+            color: #b42318;
+            font-weight: 700;
+        }
+
+        .explanation {
+            margin-top: 14px;
+            color: #71809a;
+            font-size: 13px;
+        }
+
+        .payment-result {
+            display: none;
+        }
+
+        .payment-result.visible {
+            display: block;
+        }
+
+        pre {
+            background: #171d29;
+            color: #e9edf4;
+            padding: 16px;
+            border-radius: 7px;
+            overflow-x: auto;
+            font-size: 12px;
+            line-height: 1.5;
+        }
+
+        .error {
+            display: none;
+            margin-top: 15px;
+            padding: 12px;
+            border-radius: 6px;
+            background: #fff0f0;
+            border: 1px solid #f1b7b7;
+            color: #9f1c1c;
+            font-size: 13px;
+        }
+
+        .error.visible {
+            display: block;
+        }
+
+        .dataset-note {
+            font-size: 12px;
+            color: #71809a;
+            margin-top: 8px;
+        }
+
+        @media (max-width: 900px) {
+            .grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        @media (max-width: 560px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
 </head>
+
 <body>
-<main>
-  <div class="card">
-    <h1>Dynamic Pricing Demo</h1>
-    <p class="muted">
-      T-learner uplift model &rarr; policy engine &rarr; Razorpay <strong>Test Mode</strong>.
-      All pricing is computed server-side; this page only displays it.
-    </p>
-  </div>
 
-  <div class="card">
-    <h2>Product</h2>
-    <div class="row"><span>Wireless Headphones</span><span id="product-price">&#8377;1850.00</span></div>
-  </div>
+<div class="container">
 
-  <div class="card">
-    <h2>Customer &amp; checkout details</h2>
-    <form id="checkout-form">
-      <div class="grid">
-        <div><label for="customer_id">Customer ID</label><input id="customer_id" value="C104217" /></div>
-        <div><label for="customer_type">Customer type</label>
-          <select id="customer_type">
-            <option value="returning" selected>returning</option>
-            <option value="new">new</option>
-            <option value="loyal">loyal</option>
-          </select></div>
-        <div><label for="cart_value">Cart value (&#8377;)</label><input id="cart_value" type="number" step="0.01" min="10" value="1850" /></div>
-        <div><label for="items_count">Items</label><input id="items_count" type="number" min="1" value="3" /></div>
-        <div><label for="category">Category</label>
-          <select id="category">
-            <option value="fashion" selected>fashion</option>
-            <option value="electronics">electronics</option>
-            <option value="home">home</option>
-            <option value="beauty">beauty</option>
-          </select></div>
-        <div><label for="margin_percentage">Margin %</label><input id="margin_percentage" type="number" step="0.1" min="0" max="100" value="38" /></div>
-        <div><label for="previous_purchases">Previous purchases</label><input id="previous_purchases" type="number" min="0" value="3" /></div>
-        <div><label for="previous_abandons">Previous abandons</label><input id="previous_abandons" type="number" min="0" value="2" /></div>
-        <div><label for="days_since_last_purchase">Days since last purchase</label><input id="days_since_last_purchase" type="number" min="0" value="21" /></div>
-        <div><label for="customer_lifetime_value">Lifetime value (&#8377;)</label><input id="customer_lifetime_value" type="number" step="0.01" min="0" value="6400" /></div>
-        <div><label for="historical_discount_rate">Historical discount rate</label><input id="historical_discount_rate" type="number" step="0.1" min="0" max="100" value="5" /></div>
-        <div><label for="recent_discount_count">Recent discounts</label><input id="recent_discount_count" type="number" min="0" value="0" /></div>
-        <div><label for="days_since_last_discount">Days since last discount</label><input id="days_since_last_discount" type="number" min="0" value="34" /></div>
-        <div><label for="device_type">Device</label>
-          <select id="device_type">
-            <option value="mobile" selected>mobile</option>
-            <option value="desktop">desktop</option>
-            <option value="tablet">tablet</option>
-          </select></div>
-        <div><label for="time_on_checkout_seconds">Time on checkout (s)</label><input id="time_on_checkout_seconds" type="number" step="1" min="0" value="164" /></div>
-        <div><label for="pages_viewed">Pages viewed</label><input id="pages_viewed" type="number" min="0" value="5" /></div>
-        <div><label for="payment_attempts">Payment attempts</label><input id="payment_attempts" type="number" min="0" value="1" /></div>
-        <div><label for="hour">Hour (0-23)</label><input id="hour" type="number" min="0" max="23" value="21" /></div>
-        <div><label for="day_of_week">Day of week (0-6)</label><input id="day_of_week" type="number" min="0" max="6" value="5" /></div>
-      </div>
+    <!-- HEADER -->
+    <div class="card">
+        <h1>Dynamic Pricing Demo</h1>
 
-      <p class="tamper">
-        <input type="checkbox" id="tamper" />
-        <label for="tamper" style="display:inline; text-transform:none; letter-spacing:0; font-size:.8rem;">
-          Security demo: also send <code>final_price: 1</code> and
-          <code>approved_discount_percent: 15</code> (the backend must ignore both)
+        <p class="subtitle">
+            Continuous response model → policy engine → Razorpay Test Mode.
+            All pricing is computed server-side; this page only displays it.
+        </p>
+    </div>
+
+
+    <!-- PRODUCT -->
+    <div class="card">
+        <h2>Product</h2>
+
+        <div class="result-row">
+            <span class="result-label">Product</span>
+            <span class="result-value">Wireless Headphones</span>
+        </div>
+
+        <div class="result-row">
+            <span class="result-label">Base price</span>
+            <span class="result-value" id="product-price">₹1850.00</span>
+        </div>
+    </div>
+
+
+    <!-- CUSTOMER / CHECKOUT -->
+    <div class="card">
+
+        <h2>Customer & checkout details</h2>
+
+        <!-- MODE -->
+        <div class="mode-box">
+
+            <label style="margin-bottom: 10px;">
+                Testing mode
+            </label>
+
+            <div class="mode-row">
+
+                <label class="radio-label">
+                    <input
+                        type="radio"
+                        name="input-mode"
+                        value="dataset"
+                        checked
+                    >
+                    Dataset row
+                </label>
+
+                <label class="radio-label">
+                    <input
+                        type="radio"
+                        name="input-mode"
+                        value="manual"
+                    >
+                    Manual input
+                </label>
+
+            </div>
+
+
+            <!-- DATASET CONTROLS -->
+            <div id="dataset-controls" class="dataset-controls visible">
+
+                <div class="file-row">
+
+                    <input
+                        type="file"
+                        id="dataset-file"
+                        accept=".csv"
+                    >
+
+                    <span id="file-status" class="file-status">
+                        Load transactions_train.csv or transactions_test.csv
+                    </span>
+
+                </div>
+
+                <div class="row-controls">
+
+                    <div class="field row-number">
+
+                        <label for="dataset-row">
+                            Dataset row
+                        </label>
+
+                        <input
+                            type="number"
+                            id="dataset-row"
+                            min="1"
+                            value="1"
+                        >
+
+                    </div>
+
+                    <button
+                        type="button"
+                        class="secondary"
+                        id="load-row-button"
+                    >
+                        Load Row
+                    </button>
+
+                </div>
+
+                <div class="dataset-note">
+                    Only observable checkout/customer fields are used.
+                    Ground-truth/evaluation columns are ignored.
+                </div>
+
+            </div>
+
+        </div>
+
+
+        <!-- FORM -->
+        <div class="grid">
+
+            <div class="field">
+                <label for="customer_id">Customer ID</label>
+                <input id="customer_id" type="text" value="C104217">
+            </div>
+
+            <div class="field">
+                <label for="customer_type">Customer Type</label>
+
+                <select id="customer_type">
+                    <option value="new">new</option>
+                    <option value="returning" selected>returning</option>
+                    <option value="vip">vip</option>
+                </select>
+            </div>
+
+            <div class="field">
+                <label for="cart_value">Cart Value (₹)</label>
+                <input id="cart_value" type="number" min="0.01" step="0.01" value="1850">
+            </div>
+
+            <div class="field">
+                <label for="items_count">Items</label>
+                <input id="items_count" type="number" min="1" step="1" value="3">
+            </div>
+
+
+            <div class="field">
+                <label for="category">Category</label>
+
+                <select id="category">
+                    <option value="electronics">electronics</option>
+                    <option value="fashion" selected>fashion</option>
+                    <option value="home">home</option>
+                    <option value="beauty">beauty</option>
+                    <option value="groceries">groceries</option>
+                    <option value="accessories">accessories</option>
+                    <option value="sports">sports</option>
+                </select>
+            </div>
+
+            <div class="field">
+                <label for="margin_percentage">Margin %</label>
+                <input id="margin_percentage" type="number" min="0" max="100" step="0.01" value="38">
+            </div>
+
+            <div class="field">
+                <label for="previous_purchases">Previous Purchases</label>
+                <input id="previous_purchases" type="number" min="0" step="1" value="3">
+            </div>
+
+            <div class="field">
+                <label for="previous_abandons">Previous Abandons</label>
+                <input id="previous_abandons" type="number" min="0" step="1" value="2">
+            </div>
+
+
+            <div class="field">
+                <label for="days_since_last_purchase">Days Since Last Purchase</label>
+                <input id="days_since_last_purchase" type="number" min="0" step="1" value="21">
+            </div>
+
+            <div class="field">
+                <label for="customer_lifetime_value">Lifetime Value (₹)</label>
+                <input id="customer_lifetime_value" type="number" min="0" step="0.01" value="6400">
+            </div>
+
+            <div class="field">
+                <label for="historical_discount_rate">Historical Discount Rate</label>
+                <input id="historical_discount_rate" type="number" min="0" max="100" step="0.01" value="5">
+            </div>
+
+            <div class="field">
+                <label for="recent_discount_count">Recent Discounts</label>
+                <input id="recent_discount_count" type="number" min="0" step="1" value="0">
+            </div>
+
+
+            <div class="field">
+                <label for="days_since_last_discount">Days Since Last Discount</label>
+                <input id="days_since_last_discount" type="number" min="0" step="1" value="34">
+            </div>
+
+            <div class="field">
+                <label for="device_type">Device</label>
+
+                <select id="device_type">
+                    <option value="mobile" selected>mobile</option>
+                    <option value="desktop">desktop</option>
+                    <option value="tablet">tablet</option>
+                </select>
+            </div>
+
+            <div class="field">
+                <label for="time_on_checkout_seconds">Time on Checkout (s)</label>
+                <input id="time_on_checkout_seconds" type="number" min="0" step="0.1" value="164">
+            </div>
+
+            <div class="field">
+                <label for="pages_viewed">Pages Viewed</label>
+                <input id="pages_viewed" type="number" min="0" step="1" value="5">
+            </div>
+
+
+            <div class="field">
+                <label for="payment_attempts">Payment Attempts</label>
+                <input id="payment_attempts" type="number" min="0" step="1" value="1">
+            </div>
+
+            <div class="field">
+                <label for="hour">Hour (0-23)</label>
+                <input id="hour" type="number" min="0" max="23" step="1" value="21">
+            </div>
+
+            <div class="field">
+                <label for="day_of_week">Day of Week (0-6)</label>
+                <input id="day_of_week" type="number" min="0" max="6" step="1" value="5">
+            </div>
+
+        </div>
+
+
+        <!-- SECURITY DEMO -->
+        <label class="security-demo">
+
+            <input
+                type="checkbox"
+                id="security-demo"
+            >
+
+            Security demo: also send
+            <code>final_price: 1</code> and
+            <code>approved_discount_percent: 15</code>
+            (the backend must ignore both)
+
         </label>
-      </p>
 
-      <p><button type="submit" id="calculate-btn">Calculate My Price</button></p>
-    </form>
-  </div>
 
-  <div class="card hidden" id="price-card">
-    <h2>Your personalized price</h2>
-    <div class="row"><span>Original price</span><span id="original-price" class="strike"></span></div>
-    <div class="row"><span>Personalized discount</span><span id="discount"></span></div>
-    <div class="row"><span>You save</span><span id="savings"></span></div>
-    <div class="row"><span>Final price</span><span id="final-price" class="big"></span></div>
-    <div class="row"><span>Policy decision</span><span id="decision"></span></div>
-    <div class="row"><span>Reason code</span><span id="reason"></span></div>
-    <div class="row"><span>Model recommendation</span><span id="model-rec"></span></div>
-    <div class="row"><span>Expected profit (selected)</span><span id="expected-profit"></span></div>
-    <p class="muted" id="explanation"></p>
-    <p class="warn hidden" id="ignored-note"></p>
-    <p><button id="pay-btn" class="pay">Pay</button></p>
-  </div>
+        <!-- ACTIONS -->
+        <div class="actions">
 
-  <div class="card hidden" id="result-card">
-    <h2>Payment result</h2>
-    <p id="result-text"></p>
-    <pre id="result-json"></pre>
-  </div>
-</main>
+            <button
+                type="button"
+                class="primary"
+                id="calculate-button"
+            >
+                Calculate My Price
+            </button>
 
-<!-- Official Razorpay Standard Checkout -->
-<script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+        </div>
+
+
+        <div id="error-box" class="error"></div>
+
+    </div>
+
+
+    <!-- PERSONALIZED PRICE -->
+    <div id="pricing-result" class="card result">
+
+        <h2>Your personalized price</h2>
+
+        <div class="result-row">
+            <span class="result-label">Original price</span>
+            <span class="result-value" id="original-price">₹0.00</span>
+        </div>
+
+        <div class="result-row">
+            <span class="result-label">Personalized discount</span>
+            <span class="result-value" id="discount-value">0%</span>
+        </div>
+
+        <div class="result-row">
+            <span class="result-label">You save</span>
+            <span class="result-value" id="savings-value">₹0.00</span>
+        </div>
+
+        <div class="result-row">
+            <span class="result-label">Final price</span>
+            <span class="result-value final-price" id="final-price">₹0.00</span>
+        </div>
+
+        <div class="result-row">
+            <span class="result-label">Policy decision</span>
+            <span class="result-value" id="policy-decision">—</span>
+        </div>
+
+        <div class="result-row">
+            <span class="result-label">Reason code</span>
+            <span class="result-value" id="reason-code">—</span>
+        </div>
+
+        <div class="result-row">
+            <span class="result-label">Model recommendation</span>
+            <span class="result-value" id="model-recommendation">—</span>
+        </div>
+
+        <div class="result-row">
+            <span class="result-label">Expected profit (selected)</span>
+            <span class="result-value" id="expected-profit">—</span>
+        </div>
+
+        <div class="result-row">
+            <span class="result-label">Predicted uplift (selected)</span>
+            <span class="result-value" id="predicted-uplift">—</span>
+        </div>
+
+        <div class="explanation" id="explanation"></div>
+
+        <div class="actions">
+
+            <button
+                type="button"
+                class="pay-button"
+                id="pay-button"
+            >
+                Pay
+            </button>
+
+        </div>
+
+    </div>
+
+
+    <!-- PAYMENT RESULT -->
+    <div id="payment-result" class="card payment-result">
+
+        <h2>Payment result</h2>
+
+        <p id="payment-message"></p>
+
+        <pre id="payment-json"></pre>
+
+    </div>
+
+</div>
+
 <script src="/static/app.js"></script>
+
 </body>
 </html>

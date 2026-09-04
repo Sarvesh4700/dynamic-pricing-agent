@@ -1,50 +1,37 @@
 """
-src/policy_engine.py
+Deterministic, auditable, configurable policy engine for Dynamic Pricing.
 
-Deterministic, auditable, configurable policy engine for the Dynamic Pricing
-Agent. Sits between the T-learner uplift model (src/uplift_model.py) and the
-eventual LLM agent / Razorpay integration.
+Supports BOTH:
 
-    checkout features -> T-learner -> pred_p0/5/10/15, pred_expected_profit_*,
-    pred_optimal_discount  --(THIS FILE)-->  policy decision  --later-->  LLM agent
+1. Legacy T-learner predictions:
+       pred_p0 / pred_p5 / pred_p10 / pred_p15
 
-This module trains nothing and calls no model, no LLM, and no external API.
-It takes ML predictions the caller already computed (e.g. by loading the
-T-learner's joblib models and scoring a live checkout) and applies business
-rules from config/policy.yaml to decide what discount, if any, actually gets
-offered.
+2. Continuous response-model predictions:
+       discount_predictions
+       expected_profit_predictions
 
-Profit formula reused verbatim from src/eda.py and src/uplift_model.py:
-    cost                 = cart_value * (1 - margin_percentage / 100)
-    price_after_discount = cart_value * (1 - discount / 100)
-    profit_if_converted  = price_after_discount - cost
-    expected_profit(d)   = P(convert | d) * profit_if_converted(d)
-
-Ground truth is never used here — only the ML model's own predictions,
-exactly as the caller supplies them in a CheckoutDecisionRequest.
-
-Public entry point:
-    from src.policy_engine import evaluate_policy
-    decision = evaluate_policy(request)   # request: CheckoutDecisionRequest or dict
+The policy engine itself never calls an ML model.
+It only evaluates predictions supplied by the caller.
 """
 
 import math
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, Union
 
 import yaml
 
-# --------------------------------------------------------------------------------------
+
+# =============================================================================
 # CONSTANTS
-# --------------------------------------------------------------------------------------
+# =============================================================================
+
 DISCOUNT_LEVELS = [0, 5, 10, 15]
+
 DEFAULT_CONFIG_PATH = "config/policy.yaml"
 
-# Informational only (does not affect policy logic) — identifies which model
-# architecture the predictions in an audit record came from.
-MODEL_VERSION = "t_learner_gbc_v1"
+MODEL_VERSION = "continuous_response_v1"
 
 REASON_CODES = {
     "MODEL_UNAVAILABLE",
@@ -58,24 +45,29 @@ REASON_CODES = {
 }
 
 
-# --------------------------------------------------------------------------------------
+# =============================================================================
 # DATA MODELS
-# --------------------------------------------------------------------------------------
+# =============================================================================
+
 @dataclass
 class PolicyConfig:
-    max_discount_percent: int = 15
+    max_discount_percent: float = 15.0
     minimum_profit_margin_percent: float = 5.0
     minimum_uplift: float = 0.03
     max_discounts_per_customer: int = 2
     discount_cooldown_days: int = 7
-    human_approval_threshold_percent: int = 10
-    fallback_discount_percent: int = 0
+    human_approval_threshold_percent: float = 10.0
+    fallback_discount_percent: float = 0.0
     version: str = "1.0.0"
 
 
 @dataclass
 class CheckoutDecisionRequest:
-    # --- customer information ---
+
+    # -------------------------------------------------------------------------
+    # Customer information
+    # -------------------------------------------------------------------------
+
     customer_id: str
     customer_type: str
     previous_purchases: int
@@ -84,7 +76,10 @@ class CheckoutDecisionRequest:
     recent_discount_count: int
     days_since_last_discount: Optional[float]
 
-    # --- checkout information ---
+    # -------------------------------------------------------------------------
+    # Checkout information
+    # -------------------------------------------------------------------------
+
     cart_value: float
     category: str
     margin_percentage: float
@@ -95,353 +90,1159 @@ class CheckoutDecisionRequest:
     hour: int
     day_of_week: int
 
-    # --- ML outputs (may be missing/invalid -> triggers RULE 1 fallback) ---
+    # -------------------------------------------------------------------------
+    # LEGACY MODEL OUTPUTS
+    # -------------------------------------------------------------------------
+
     pred_p0: Optional[float] = None
     pred_p5: Optional[float] = None
     pred_p10: Optional[float] = None
     pred_p15: Optional[float] = None
+
     pred_expected_profit_0: Optional[float] = None
     pred_expected_profit_5: Optional[float] = None
     pred_expected_profit_10: Optional[float] = None
     pred_expected_profit_15: Optional[float] = None
-    pred_optimal_discount: Optional[int] = None
+
+    # -------------------------------------------------------------------------
+    # Common model outputs
+    # -------------------------------------------------------------------------
+
+    pred_optimal_discount: Optional[float] = None
     pred_max_expected_profit: Optional[float] = None
 
+    # -------------------------------------------------------------------------
+    # CONTINUOUS MODEL OUTPUTS
+    # -------------------------------------------------------------------------
 
-def _coerce_request(request: Union[CheckoutDecisionRequest, dict]) -> CheckoutDecisionRequest:
+    discount_predictions: Optional[dict] = None
+    expected_profit_predictions: Optional[dict] = None
+
+
+# =============================================================================
+# REQUEST / CONFIG HELPERS
+# =============================================================================
+
+def _coerce_request(
+    request: Union[CheckoutDecisionRequest, dict]
+) -> CheckoutDecisionRequest:
+
     if isinstance(request, CheckoutDecisionRequest):
         return request
+
     if isinstance(request, dict):
         return CheckoutDecisionRequest(**request)
-    raise TypeError("request must be a CheckoutDecisionRequest or a dict of its fields")
 
-
-def _coerce_config(config: Union[PolicyConfig, dict, None]) -> PolicyConfig:
-    if config is None:
-        return load_policy_config()
-    if isinstance(config, PolicyConfig):
-        return config
-    if isinstance(config, dict):
-        return PolicyConfig(**config)
-    raise TypeError("config must be a PolicyConfig, a dict, or None")
-
-
-def load_policy_config(path: str = DEFAULT_CONFIG_PATH) -> PolicyConfig:
-    """Load thresholds from policy.yaml. Never hardcode these values elsewhere."""
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f"Expected {path}. Run from the project root (the directory containing "
-            f"'config/' and 'src/'), or pass an explicit config to evaluate_policy()."
-        )
-    with open(path, "r") as f:
-        raw = yaml.safe_load(f) or {}
-
-    return PolicyConfig(
-        max_discount_percent=raw.get("max_discount_percent", 15),
-        minimum_profit_margin_percent=raw.get("minimum_profit_margin_percent", 5.0),
-        minimum_uplift=raw.get("minimum_uplift", 0.03),
-        max_discounts_per_customer=raw.get("max_discounts_per_customer", 2),
-        discount_cooldown_days=raw.get("discount_cooldown_days", 7),
-        human_approval_threshold_percent=raw.get("human_approval_threshold_percent", 10),
-        fallback_discount_percent=raw.get("fallback_discount_percent", 0),
-        version=str(raw.get("policy_version", "1.0.0")),
+    raise TypeError(
+        "request must be a CheckoutDecisionRequest or a dict of its fields"
     )
 
 
-# --------------------------------------------------------------------------------------
+def _coerce_config(
+    config: Union[PolicyConfig, dict, None]
+) -> PolicyConfig:
+
+    if config is None:
+        return load_policy_config()
+
+    if isinstance(config, PolicyConfig):
+        return config
+
+    if isinstance(config, dict):
+        return PolicyConfig(**config)
+
+    raise TypeError(
+        "config must be a PolicyConfig, a dict, or None"
+    )
+
+
+def load_policy_config(
+    path: str = DEFAULT_CONFIG_PATH
+) -> PolicyConfig:
+
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"Expected {path}. Run from the project root "
+            "(the directory containing config/ and src/), "
+            "or pass an explicit config to evaluate_policy()."
+        )
+
+    with open(path, "r", encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+
+    return PolicyConfig(
+        max_discount_percent=float(
+            raw.get("max_discount_percent", 15)
+        ),
+        minimum_profit_margin_percent=float(
+            raw.get("minimum_profit_margin_percent", 5.0)
+        ),
+        minimum_uplift=float(
+            raw.get("minimum_uplift", 0.03)
+        ),
+        max_discounts_per_customer=int(
+            raw.get("max_discounts_per_customer", 2)
+        ),
+        discount_cooldown_days=int(
+            raw.get("discount_cooldown_days", 7)
+        ),
+        human_approval_threshold_percent=float(
+            raw.get("human_approval_threshold_percent", 10)
+        ),
+        fallback_discount_percent=float(
+            raw.get("fallback_discount_percent", 0)
+        ),
+        version=str(
+            raw.get("policy_version", "1.0.0")
+        ),
+    )
+
+
+# =============================================================================
+# PREDICTION HELPERS
+# =============================================================================
+
+def _normalise_dict(values: dict) -> dict:
+
+    result = {}
+
+    for key, value in values.items():
+
+        try:
+            discount = float(key)
+            prediction = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Invalid prediction entry: {key} -> {value}"
+            )
+
+        if not math.isfinite(discount):
+            raise ValueError(
+                f"Discount {key} is not finite"
+            )
+
+        if not math.isfinite(prediction):
+            raise ValueError(
+                f"Prediction for {key}% is not finite"
+            )
+
+        if not 0.0 <= prediction <= 1.0:
+            raise ValueError(
+                f"Prediction for {key}% = {prediction} "
+                "is outside [0, 1]"
+            )
+
+        result[discount] = prediction
+
+    return result
+
+
+def get_prediction_map(
+    request: CheckoutDecisionRequest
+) -> dict:
+    """
+    Prefer continuous predictions when available.
+
+    Otherwise use the legacy 0/5/10/15 predictions.
+    """
+
+    if request.discount_predictions:
+
+        return _normalise_dict(
+            request.discount_predictions
+        )
+
+    legacy = {
+        0.0: request.pred_p0,
+        5.0: request.pred_p5,
+        10.0: request.pred_p10,
+        15.0: request.pred_p15,
+    }
+
+    if all(
+        value is not None
+        for value in legacy.values()
+    ):
+        return _normalise_dict(
+            legacy
+        )
+
+    return {}
+
+
+def get_profit_map(
+    request: CheckoutDecisionRequest
+) -> dict:
+
+    if request.expected_profit_predictions:
+
+        raw = {}
+
+        for key, value in (
+            request.expected_profit_predictions.items()
+        ):
+
+            try:
+                d = float(key)
+                p = float(value)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"Invalid expected-profit entry: "
+                    f"{key} -> {value}"
+                )
+
+            if not math.isfinite(p):
+                raise ValueError(
+                    f"Expected profit for {d}% "
+                    "is not finite"
+                )
+
+            raw[d] = p
+
+        return raw
+
+    legacy = {
+        0.0: request.pred_expected_profit_0,
+        5.0: request.pred_expected_profit_5,
+        10.0: request.pred_expected_profit_10,
+        15.0: request.pred_expected_profit_15,
+    }
+
+    if all(
+        value is not None
+        for value in legacy.values()
+    ):
+        return {
+            float(k): float(v)
+            for k, v in legacy.items()
+        }
+
+    return {}
+
+
+# =============================================================================
 # RULE 1 — MODEL AVAILABILITY
-# --------------------------------------------------------------------------------------
-def validate_model_output(request: CheckoutDecisionRequest):
-    """True/False + a short detail string. Checks presence, finiteness, and
-    basic range sanity of every ML field the policy engine depends on."""
-    required = {
-        "pred_p0": request.pred_p0, "pred_p5": request.pred_p5,
-        "pred_p10": request.pred_p10, "pred_p15": request.pred_p15,
-        "pred_expected_profit_0": request.pred_expected_profit_0,
-        "pred_expected_profit_5": request.pred_expected_profit_5,
-        "pred_expected_profit_10": request.pred_expected_profit_10,
-        "pred_expected_profit_15": request.pred_expected_profit_15,
-        "pred_optimal_discount": request.pred_optimal_discount,
-        "pred_max_expected_profit": request.pred_max_expected_profit,
-    }
-    for name, value in required.items():
-        if value is None:
-            return False, f"required model output '{name}' is missing (None)"
-        if isinstance(value, float) and not math.isfinite(value):
-            return False, f"required model output '{name}' is NaN or infinite"
+# =============================================================================
 
-    for name in ("pred_p0", "pred_p5", "pred_p10", "pred_p15"):
-        p = required[name]
-        if not (0.0 <= p <= 1.0):
-            return False, f"'{name}' = {p} is outside the valid [0, 1] probability range"
+def validate_model_output(
+    request: CheckoutDecisionRequest
+):
 
-    if request.pred_optimal_discount not in DISCOUNT_LEVELS:
-        return False, (f"pred_optimal_discount = {request.pred_optimal_discount} is not a "
-                        f"recognized discount level {DISCOUNT_LEVELS}")
+    try:
 
-    return True, "model outputs present and valid"
+        probabilities = get_prediction_map(
+            request
+        )
+
+        profits = get_profit_map(
+            request
+        )
+
+    except (TypeError, ValueError) as exc:
+
+        return False, str(exc)
+
+    if not probabilities:
+        return False, (
+            "no valid model conversion predictions "
+            "were supplied"
+        )
+
+    if not profits:
+        return False, (
+            "no valid model expected-profit predictions "
+            "were supplied"
+        )
+
+    if 0.0 not in probabilities:
+        return False, (
+            "model predictions must include 0% baseline"
+        )
+
+    if 0.0 not in profits:
+        return False, (
+            "model expected profits must include 0% baseline"
+        )
+
+    if request.pred_optimal_discount is None:
+        return False, (
+            "pred_optimal_discount is missing"
+        )
+
+    if request.pred_max_expected_profit is None:
+        return False, (
+            "pred_max_expected_profit is missing"
+        )
+
+    try:
+
+        optimal = float(
+            request.pred_optimal_discount
+        )
+
+        max_profit = float(
+            request.pred_max_expected_profit
+        )
+
+    except (TypeError, ValueError):
+
+        return False, (
+            "pred_optimal_discount or "
+            "pred_max_expected_profit is invalid"
+        )
+
+    if not math.isfinite(optimal):
+        return False, (
+            "pred_optimal_discount is not finite"
+        )
+
+    if not math.isfinite(max_profit):
+        return False, (
+            "pred_max_expected_profit is not finite"
+        )
+
+    return True, (
+        "model outputs present and valid"
+    )
 
 
-# --------------------------------------------------------------------------------------
+# =============================================================================
 # UPLIFT
-# --------------------------------------------------------------------------------------
-def calculate_uplift(request: CheckoutDecisionRequest) -> dict:
-    """uplift(d) = predicted P(convert | d) - predicted P(convert | 0), for d in {5,10,15}.
-    0% is exempt from any uplift requirement by definition."""
+# =============================================================================
+
+def calculate_uplift(
+    request: CheckoutDecisionRequest
+) -> dict:
+
+    probabilities = get_prediction_map(
+        request
+    )
+
+    if 0.0 not in probabilities:
+        raise ValueError(
+            "0% prediction is required to calculate uplift"
+        )
+
+    baseline = probabilities[0.0]
+
     return {
-        5: request.pred_p5 - request.pred_p0,
-        10: request.pred_p10 - request.pred_p0,
-        15: request.pred_p15 - request.pred_p0,
+        discount:
+            probability - baseline
+        for discount, probability
+        in probabilities.items()
     }
 
 
-# --------------------------------------------------------------------------------------
+# =============================================================================
 # RULE 3 — PROFIT FLOOR
-# --------------------------------------------------------------------------------------
-def check_profit_floor(request: CheckoutDecisionRequest, config: PolicyConfig, discount: int):
-    """Same economic definition as src/eda.py and src/uplift_model.py:
-    cost = V*(1-m), price_after_discount = V*(1-d/100), profit_if_converted =
-    price_after_discount - cost. Passes if profit_if_converted / cart_value
-    is still at or above the configured floor."""
-    V = request.cart_value
-    m = request.margin_percentage / 100.0
-    cost = V * (1 - m)
-    price_after_discount = V * (1 - discount / 100.0)
-    profit_if_converted = price_after_discount - cost
+# =============================================================================
 
-    margin_after_discount_pct = (profit_if_converted / V) * 100 if V else float("-inf")
-    passed = margin_after_discount_pct >= config.minimum_profit_margin_percent
-    detail = (f"margin after {discount}% discount = {margin_after_discount_pct:.2f}% "
-              f"(floor = {config.minimum_profit_margin_percent:.2f}%)")
+def check_profit_floor(
+    request: CheckoutDecisionRequest,
+    config: PolicyConfig,
+    discount: float,
+):
+
+    V = float(
+        request.cart_value
+    )
+
+    margin = (
+        float(request.margin_percentage)
+        / 100.0
+    )
+
+    if V <= 0:
+        return False, (
+            "cart value must be greater than zero"
+        )
+
+    cost = V * (
+        1.0 - margin
+    )
+
+    price_after_discount = V * (
+        1.0 - float(discount) / 100.0
+    )
+
+    profit_if_converted = (
+        price_after_discount
+        - cost
+    )
+
+    margin_after_discount_pct = (
+        profit_if_converted
+        / V
+    ) * 100.0
+
+    passed = (
+        margin_after_discount_pct
+        >= config.minimum_profit_margin_percent
+    )
+
+    detail = (
+        f"margin after {discount:g}% discount = "
+        f"{margin_after_discount_pct:.2f}% "
+        f"(floor = "
+        f"{config.minimum_profit_margin_percent:.2f}%)"
+    )
+
     return passed, detail
 
 
-# --------------------------------------------------------------------------------------
-# RULE 6 — CUSTOMER DISCOUNT FREQUENCY
-# --------------------------------------------------------------------------------------
-def check_frequency_limit(request: CheckoutDecisionRequest, config: PolicyConfig):
-    """Only uses recent_discount_count, which the caller is expected to have
-    already scoped to the configured cooldown window — this function does not
-    invent cooldown logic from days_since_last_discount, per spec."""
-    blocked = request.recent_discount_count >= config.max_discounts_per_customer
+# =============================================================================
+# RULE 6 — FREQUENCY
+# =============================================================================
+
+def check_frequency_limit(
+    request: CheckoutDecisionRequest,
+    config: PolicyConfig,
+):
+
+    blocked = (
+        request.recent_discount_count
+        >= config.max_discounts_per_customer
+    )
+
     if blocked:
-        detail = (f"customer has received {request.recent_discount_count} discount(s), "
-                  f"at or above the limit of {config.max_discounts_per_customer} within "
-                  f"the configured {config.discount_cooldown_days}-day cooldown")
+
+        detail = (
+            f"customer has received "
+            f"{request.recent_discount_count} discount(s), "
+            f"at or above the limit of "
+            f"{config.max_discounts_per_customer} "
+            f"within the configured "
+            f"{config.discount_cooldown_days}-day cooldown"
+        )
+
     else:
-        detail = (f"customer has received {request.recent_discount_count} discount(s), "
-                  f"under the limit of {config.max_discounts_per_customer}")
-    return (not blocked), detail
+
+        detail = (
+            f"customer has received "
+            f"{request.recent_discount_count} discount(s), "
+            f"under the limit of "
+            f"{config.max_discounts_per_customer}"
+        )
+
+    return (
+        not blocked,
+        detail,
+    )
 
 
-# --------------------------------------------------------------------------------------
-# CANDIDATE FILTERING + ECONOMIC SELECTION
-# (RULE 2 discount bound, RULE 3 profit floor, RULE 4 uplift, RULE 6 frequency)
-# --------------------------------------------------------------------------------------
-def select_best_valid_discount(request: CheckoutDecisionRequest, config: PolicyConfig):
-    """Considers ALL FOUR candidate discounts, filters each against every
-    applicable policy rule, and returns the highest-predicted-expected-profit
-    candidate that survives. 0% is always structurally valid (never subject to
-    the cap, profit-floor, or uplift checks; only a customer-level frequency
-    block is even possible for it, and 0% is never itself a 'discount received').
-    """
-    profit_map = {
-        0: request.pred_expected_profit_0, 5: request.pred_expected_profit_5,
-        10: request.pred_expected_profit_10, 15: request.pred_expected_profit_15,
-    }
-    uplift = calculate_uplift(request)
+# =============================================================================
+# CANDIDATE FILTERING
+# =============================================================================
 
-    freq_ok, freq_detail = check_frequency_limit(request, config)
-    checks = [{"check": "frequency_limit", "discount": None, "passed": freq_ok, "detail": freq_detail}]
+def select_best_valid_discount(
+    request: CheckoutDecisionRequest,
+    config: PolicyConfig,
+):
 
-    valid = {0: True}
+    probabilities = get_prediction_map(
+        request
+    )
+
+    profit_map = get_profit_map(
+        request
+    )
+
+    uplift = calculate_uplift(
+        request
+    )
+
+    frequency_ok, frequency_detail = (
+        check_frequency_limit(
+            request,
+            config,
+        )
+    )
+
+    checks = [
+        {
+            "check": "frequency_limit",
+            "discount": None,
+            "passed": frequency_ok,
+            "detail": frequency_detail,
+        }
+    ]
+
+    valid_candidates = []
+
     exclusion_reasons = {}
 
-    for d in (5, 10, 15):
+    # Only evaluate discounts for which the model supplied
+    # both probability and expected profit.
+    candidates = sorted(
+        set(probabilities.keys())
+        & set(profit_map.keys())
+    )
+
+    for discount in candidates:
+
         reasons = []
 
-        cap_ok = d <= config.max_discount_percent
-        checks.append({
-            "check": "discount_cap", "discount": d, "passed": cap_ok,
-            "detail": (f"{d}% is within the configured max of {config.max_discount_percent}%" if cap_ok
-                       else f"{d}% exceeds the configured max of {config.max_discount_percent}%"),
-        })
+        # ---------------------------------------------------------------------
+        # Discount cap
+        # ---------------------------------------------------------------------
+
+        cap_ok = (
+            discount
+            <= config.max_discount_percent
+        )
+
+        checks.append(
+            {
+                "check": "discount_cap",
+                "discount": discount,
+                "passed": cap_ok,
+                "detail": (
+                    f"{discount:g}% is within the configured "
+                    f"max of "
+                    f"{config.max_discount_percent:g}%"
+                    if cap_ok
+                    else
+                    f"{discount:g}% exceeds the configured "
+                    f"max of "
+                    f"{config.max_discount_percent:g}%"
+                ),
+            }
+        )
+
         if not cap_ok:
-            reasons.append("DISCOUNT_CAP_EXCEEDED")
+            reasons.append(
+                "DISCOUNT_CAP_EXCEEDED"
+            )
 
-        floor_ok, floor_detail = check_profit_floor(request, config, d)
-        checks.append({"check": "profit_floor", "discount": d, "passed": floor_ok, "detail": floor_detail})
-        if not floor_ok:
-            reasons.append("PROFIT_FLOOR_VIOLATION")
+        # ---------------------------------------------------------------------
+        # Profit floor
+        # ---------------------------------------------------------------------
 
-        d_uplift = uplift[d]
-        uplift_ok = d_uplift >= config.minimum_uplift
-        checks.append({
-            "check": "minimum_uplift", "discount": d, "passed": uplift_ok,
-            "detail": (f"uplift {d_uplift:.4f} >= required {config.minimum_uplift:.4f}" if uplift_ok
-                       else f"uplift {d_uplift:.4f} < required {config.minimum_uplift:.4f}"),
-        })
-        if not uplift_ok:
-            reasons.append("INSUFFICIENT_UPLIFT")
+        floor_ok, floor_detail = (
+            check_profit_floor(
+                request,
+                config,
+                discount,
+            )
+        )
 
-        if not freq_ok:
-            reasons.append("DISCOUNT_FREQUENCY_LIMIT")
+        checks.append(
+            {
+                "check": "profit_floor",
+                "discount": discount,
+                "passed": floor_ok,
+                "detail": floor_detail,
+            }
+        )
 
-        valid[d] = len(reasons) == 0
-        if reasons:
-            exclusion_reasons[d] = reasons
+        if not floor_ok and discount != 0:
+            reasons.append(
+                "PROFIT_FLOOR_VIOLATION"
+            )
 
-    valid_candidates = [d for d in DISCOUNT_LEVELS if valid[d]]
-    best = max(valid_candidates, key=lambda d: profit_map[d])
+        # ---------------------------------------------------------------------
+        # Uplift
+        # ---------------------------------------------------------------------
 
-    if best == 0:
-        if len(valid_candidates) > 1:
-            # 0% legitimately out-profited at least one other still-valid candidate
-            provisional_reason = "NO_DISCOUNT_OPTIMAL"
+        if discount == 0:
+
+            uplift_ok = True
+
+            uplift_detail = (
+                "0% baseline is exempt from "
+                "minimum uplift requirement"
+            )
+
         else:
-            # every positive discount was excluded outright - report the most
-            # decisive binding reason (a hard customer-level rule outranks the
-            # economic ones, which in turn outrank the structural cap)
-            all_reasons = set()
-            for d in (5, 10, 15):
-                all_reasons.update(exclusion_reasons.get(d, []))
-            for candidate_reason in ("DISCOUNT_FREQUENCY_LIMIT", "PROFIT_FLOOR_VIOLATION",
-                                      "INSUFFICIENT_UPLIFT", "DISCOUNT_CAP_EXCEEDED"):
-                if candidate_reason in all_reasons:
-                    provisional_reason = candidate_reason
-                    break
+
+            d_uplift = uplift.get(
+                discount
+            )
+
+            if d_uplift is None:
+
+                uplift_ok = False
+
+                uplift_detail = (
+                    f"no uplift prediction available "
+                    f"for {discount:g}%"
+                )
+
             else:
-                provisional_reason = "NO_DISCOUNT_OPTIMAL"
+
+                uplift_ok = (
+                    d_uplift
+                    >= config.minimum_uplift
+                )
+
+                uplift_detail = (
+                    f"uplift {d_uplift:.4f} >= "
+                    f"required "
+                    f"{config.minimum_uplift:.4f}"
+                    if uplift_ok
+                    else
+                    f"uplift {d_uplift:.4f} < "
+                    f"required "
+                    f"{config.minimum_uplift:.4f}"
+                )
+
+            if not uplift_ok:
+                reasons.append(
+                    "INSUFFICIENT_UPLIFT"
+                )
+
+        checks.append(
+            {
+                "check": "minimum_uplift",
+                "discount": discount,
+                "passed": uplift_ok,
+                "detail": uplift_detail,
+            }
+        )
+
+        # ---------------------------------------------------------------------
+        # Frequency
+        # ---------------------------------------------------------------------
+
+        if (
+            discount != 0
+            and not frequency_ok
+        ):
+
+            reasons.append(
+                "DISCOUNT_FREQUENCY_LIMIT"
+            )
+
+        # ---------------------------------------------------------------------
+        # Candidate accepted/rejected
+        # ---------------------------------------------------------------------
+
+        if reasons:
+
+            exclusion_reasons[
+                discount
+            ] = reasons
+
+        else:
+
+            valid_candidates.append(
+                discount
+            )
+
+    # -------------------------------------------------------------------------
+    # 0% safety fallback
+    # -------------------------------------------------------------------------
+
+    if (
+        0.0 in profit_map
+        and 0.0 not in valid_candidates
+    ):
+        valid_candidates.append(
+            0.0
+        )
+
+    if not valid_candidates:
+
+        return (
+            0.0,
+            "NO_DISCOUNT_OPTIMAL",
+            checks,
+            request.pred_optimal_discount,
+            profit_map,
+            uplift,
+        )
+
+    # -------------------------------------------------------------------------
+    # Economic selection
+    # -------------------------------------------------------------------------
+
+    best = max(
+        valid_candidates,
+        key=lambda d: profit_map[d],
+    )
+
+    # -------------------------------------------------------------------------
+    # Reason
+    # -------------------------------------------------------------------------
+
+    if best == 0.0:
+
+        if len(valid_candidates) > 1:
+
+            provisional_reason = (
+                "NO_DISCOUNT_OPTIMAL"
+            )
+
+        else:
+
+            all_reasons = set()
+
+            for reasons in (
+                exclusion_reasons.values()
+            ):
+                all_reasons.update(
+                    reasons
+                )
+
+            provisional_reason = (
+                "NO_DISCOUNT_OPTIMAL"
+            )
+
+            for candidate_reason in (
+                "DISCOUNT_FREQUENCY_LIMIT",
+                "PROFIT_FLOOR_VIOLATION",
+                "INSUFFICIENT_UPLIFT",
+                "DISCOUNT_CAP_EXCEEDED",
+            ):
+
+                if candidate_reason in all_reasons:
+
+                    provisional_reason = (
+                        candidate_reason
+                    )
+
+                    break
+
     else:
+
         provisional_reason = "APPROVED"
 
-    return best, provisional_reason, checks, request.pred_optimal_discount, profit_map, uplift
+    return (
+        best,
+        provisional_reason,
+        checks,
+        request.pred_optimal_discount,
+        profit_map,
+        uplift,
+    )
 
 
-# --------------------------------------------------------------------------------------
-# RULE 7 / RULE 8 — HUMAN APPROVAL GATE + FINAL APPROVAL
-# --------------------------------------------------------------------------------------
-def apply_approval_gate(candidate_discount: int, provisional_reason_code: str, config: PolicyConfig):
-    if candidate_discount > config.human_approval_threshold_percent:
-        return "HUMAN_APPROVAL_REQUIRED", "HIGH_DISCOUNT_REQUIRES_APPROVAL"
-    return "APPROVED", provisional_reason_code
+# =============================================================================
+# HUMAN APPROVAL GATE
+# =============================================================================
+
+def apply_approval_gate(
+    candidate_discount: float,
+    provisional_reason_code: str,
+    config: PolicyConfig,
+):
+
+    if (
+        candidate_discount
+        > config.human_approval_threshold_percent
+    ):
+
+        return (
+            "HUMAN_APPROVAL_REQUIRED",
+            "HIGH_DISCOUNT_REQUIRES_APPROVAL",
+        )
+
+    return (
+        "APPROVED",
+        provisional_reason_code,
+    )
 
 
-# --------------------------------------------------------------------------------------
-# DECISION EXPLANATION
-# --------------------------------------------------------------------------------------
-def _generate_explanation(reason_code: str, discount: int) -> str:
+# =============================================================================
+# EXPLANATION
+# =============================================================================
+
+def _generate_explanation(
+    reason_code: str,
+    discount: float,
+) -> str:
+
     templates = {
+
         "MODEL_UNAVAILABLE":
-            "Safe fallback applied because the pricing model was unavailable.",
+            "Safe fallback applied because the pricing "
+            "model was unavailable.",
+
         "NO_DISCOUNT_OPTIMAL":
-            "No discount approved because the predicted incremental conversion lift "
-            "does not justify reducing the merchant's margin.",
+            "No discount approved because the predicted "
+            "economic benefit does not justify reducing "
+            "the merchant's margin.",
+
         "INSUFFICIENT_UPLIFT":
-            f"Discount rejected because the predicted incremental conversion lift does not "
-            f"meet the minimum required threshold; {discount}% is the best option that qualifies.",
+            "Discount rejected because the predicted "
+            "incremental conversion lift does not meet "
+            "the minimum required threshold.",
+
         "PROFIT_FLOOR_VIOLATION":
-            f"Discount rejected because it would push the merchant's margin below the "
-            f"configured profit floor; {discount}% is the highest discount that still clears it.",
+            "Discount rejected because it would push the "
+            "merchant's margin below the configured "
+            "profit floor.",
+
         "DISCOUNT_FREQUENCY_LIMIT":
-            "Discount rejected because this customer has reached the configured discount "
-            "frequency limit.",
+            "Discount rejected because this customer has "
+            "reached the configured discount frequency limit.",
+
         "DISCOUNT_CAP_EXCEEDED":
-            f"Discount capped at {discount}% because higher discounts exceed the maximum "
-            f"allowed by policy.",
+            f"Discount capped because {discount:g}% "
+            "exceeds the maximum allowed by policy.",
+
         "HIGH_DISCOUNT_REQUIRES_APPROVAL":
-            f"{discount}% discount requires human approval because it exceeds the "
-            f"automatic approval threshold.",
+            f"{discount:g}% discount requires human approval "
+            "because it exceeds the automatic approval threshold.",
+
         "APPROVED":
-            f"{discount}% discount approved because it provides sufficient incremental "
-            f"conversion lift while remaining above the merchant's profit floor.",
+            f"{discount:g}% discount approved because it "
+            "provides sufficient incremental conversion lift "
+            "while remaining above the merchant's profit floor.",
     }
-    return templates.get(reason_code, f"Decision reason: {reason_code}; discount: {discount}%.")
+
+    return templates.get(
+        reason_code,
+        f"Decision reason: {reason_code}; "
+        f"discount: {discount:g}%.",
+    )
 
 
-# --------------------------------------------------------------------------------------
+# =============================================================================
 # AUDIT RECORD
-# --------------------------------------------------------------------------------------
-def build_audit_record(request: CheckoutDecisionRequest, config: PolicyConfig, *, decision: str,
-                        reason_code: str, policy_selected_discount: int, checks: list,
-                        model_recommended_discount, model_available: bool,
-                        profit_map: Optional[dict] = None, uplift: Optional[dict] = None) -> dict:
-    timestamp = datetime.now(timezone.utc).isoformat()
+# =============================================================================
+
+def build_audit_record(
+    request: CheckoutDecisionRequest,
+    config: PolicyConfig,
+    *,
+    decision: str,
+    reason_code: str,
+    policy_selected_discount: float,
+    checks: list,
+    model_recommended_discount,
+    model_available: bool,
+    profit_map: Optional[dict] = None,
+    uplift: Optional[dict] = None,
+) -> dict:
+
+    timestamp = datetime.now(
+        timezone.utc
+    ).isoformat()
+
+    # -------------------------------------------------------------------------
+    # ALWAYS preserve the legacy audit fields.
+    #
+    # This is important because the existing API/tests expect them.
+    # -------------------------------------------------------------------------
 
     if not model_available:
-        pred_probs = {f"pred_p{d}": None for d in DISCOUNT_LEVELS}
-        pred_profits = {f"pred_expected_profit_{d}": None for d in DISCOUNT_LEVELS}
+
+        pred_p0 = None
+        pred_p5 = None
+        pred_p10 = None
+        pred_p15 = None
+
+        pred_profit_0 = None
+        pred_profit_5 = None
+        pred_profit_10 = None
+        pred_profit_15 = None
+
         expected_profit_selected = None
         predicted_uplift_selected = None
+
     else:
-        pred_probs = {
-            "pred_p0": request.pred_p0, "pred_p5": request.pred_p5,
-            "pred_p10": request.pred_p10, "pred_p15": request.pred_p15,
-        }
-        pred_profits = {
-            "pred_expected_profit_0": request.pred_expected_profit_0,
-            "pred_expected_profit_5": request.pred_expected_profit_5,
-            "pred_expected_profit_10": request.pred_expected_profit_10,
-            "pred_expected_profit_15": request.pred_expected_profit_15,
-        }
-        expected_profit_selected = profit_map[policy_selected_discount]
-        predicted_uplift_selected = 0.0 if policy_selected_discount == 0 else uplift[policy_selected_discount]
+
+        predictions = get_prediction_map(
+            request
+        )
+
+        profits = get_profit_map(
+            request
+        )
+
+        pred_p0 = predictions.get(
+            0.0
+        )
+
+        pred_p5 = predictions.get(
+            5.0
+        )
+
+        pred_p10 = predictions.get(
+            10.0
+        )
+
+        pred_p15 = predictions.get(
+            15.0
+        )
+
+        pred_profit_0 = profits.get(
+            0.0
+        )
+
+        pred_profit_5 = profits.get(
+            5.0
+        )
+
+        pred_profit_10 = profits.get(
+            10.0
+        )
+
+        pred_profit_15 = profits.get(
+            15.0
+        )
+
+        if profit_map is not None:
+
+            expected_profit_selected = (
+                profit_map.get(
+                    float(
+                        policy_selected_discount
+                    )
+                )
+            )
+
+        else:
+
+            expected_profit_selected = None
+
+        if (
+            policy_selected_discount == 0
+        ):
+
+            predicted_uplift_selected = 0.0
+
+        elif uplift is not None:
+
+            predicted_uplift_selected = (
+                uplift.get(
+                    float(
+                        policy_selected_discount
+                    )
+                )
+            )
+
+        else:
+
+            predicted_uplift_selected = None
+
+    # -------------------------------------------------------------------------
+    # Build audit record
+    # -------------------------------------------------------------------------
 
     record = {
-        "timestamp": timestamp,
-        "customer_id": request.customer_id,
-        "cart_value": request.cart_value,
-        **pred_probs,
-        **pred_profits,
-        "model_recommended_discount": model_recommended_discount,
-        "policy_selected_discount": policy_selected_discount,
-        "decision": decision,
-        "reason_code": reason_code,
-        "policy_checks": checks,
-        "expected_profit_selected": expected_profit_selected,
-        "predicted_uplift_selected": predicted_uplift_selected,
-        "model_version": MODEL_VERSION,
-        "policy_version": config.version,
-        "model_available": model_available,
-        "explanation": _generate_explanation(reason_code, policy_selected_discount),
+
+        "timestamp":
+            timestamp,
+
+        "customer_id":
+            request.customer_id,
+
+        "cart_value":
+            request.cart_value,
+
+        # Legacy audit fields
+        "pred_p0":
+            pred_p0,
+
+        "pred_p5":
+            pred_p5,
+
+        "pred_p10":
+            pred_p10,
+
+        "pred_p15":
+            pred_p15,
+
+        "pred_expected_profit_0":
+            pred_profit_0,
+
+        "pred_expected_profit_5":
+            pred_profit_5,
+
+        "pred_expected_profit_10":
+            pred_profit_10,
+
+        "pred_expected_profit_15":
+            pred_profit_15,
+
+        # Continuous predictions
+        "discount_predictions":
+            (
+                request.discount_predictions
+                if model_available
+                else None
+            ),
+
+        "expected_profit_predictions":
+            (
+                request.expected_profit_predictions
+                if model_available
+                else None
+            ),
+
+        "model_recommended_discount":
+            model_recommended_discount,
+
+        "policy_selected_discount":
+            policy_selected_discount,
+
+        "decision":
+            decision,
+
+        "reason_code":
+            reason_code,
+
+        "policy_checks":
+            checks,
+
+        "expected_profit_selected":
+            expected_profit_selected,
+
+        "predicted_uplift_selected":
+            predicted_uplift_selected,
+
+        "model_version":
+            MODEL_VERSION,
+
+        "policy_version":
+            config.version,
+
+        "model_available":
+            model_available,
+
+        "explanation":
+            _generate_explanation(
+                reason_code,
+                policy_selected_discount,
+            ),
     }
+
     return record
 
 
-# --------------------------------------------------------------------------------------
+# =============================================================================
 # PUBLIC ENTRY POINT
-# --------------------------------------------------------------------------------------
-def evaluate_policy(request: Union[CheckoutDecisionRequest, dict],
-                     config: Union[PolicyConfig, dict, None] = None) -> dict:
-    """Evaluate one checkout's pricing decision. Deterministic, side-effect-free
-    (no model calls, no LLM calls, no network calls), and never raises for
-    missing/invalid ML predictions -- RULE 1 catches those and returns a safe
-    fallback instead, so a checkout can never fail because of this function."""
-    request = _coerce_request(request)
-    config = _coerce_config(config)
+# =============================================================================
 
-    # RULE 1 - model availability (short-circuits everything else)
-    valid_model, model_detail = validate_model_output(request)
+def evaluate_policy(
+    request: Union[
+        CheckoutDecisionRequest,
+        dict,
+    ],
+    config: Union[
+        PolicyConfig,
+        dict,
+        None,
+    ] = None,
+) -> dict:
+
+    request = _coerce_request(
+        request
+    )
+
+    config = _coerce_config(
+        config
+    )
+
+    # -------------------------------------------------------------------------
+    # RULE 1 — MODEL AVAILABILITY
+    # -------------------------------------------------------------------------
+
+    valid_model, model_detail = (
+        validate_model_output(
+            request
+        )
+    )
+
     if not valid_model:
-        checks = [{"check": "model_availability", "discount": None, "passed": False, "detail": model_detail}]
+
+        checks = [
+            {
+                "check":
+                    "model_availability",
+
+                "discount":
+                    None,
+
+                "passed":
+                    False,
+
+                "detail":
+                    model_detail,
+            }
+        ]
+
         return build_audit_record(
-            request, config,
-            decision="FALLBACK", reason_code="MODEL_UNAVAILABLE",
-            policy_selected_discount=config.fallback_discount_percent,
-            checks=checks, model_recommended_discount=None, model_available=False,
+            request,
+            config,
+            decision="FALLBACK",
+            reason_code="MODEL_UNAVAILABLE",
+            policy_selected_discount=(
+                config.fallback_discount_percent
+            ),
+            checks=checks,
+            model_recommended_discount=None,
+            model_available=False,
         )
 
-    # RULES 2/3/4/5/6 - filter all four candidates, pick the best valid one
-    best, provisional_reason, checks, model_recommended, profit_map, uplift = \
-        select_best_valid_discount(request, config)
-    checks = [{"check": "model_availability", "discount": None, "passed": True, "detail": model_detail}] + checks
+    # -------------------------------------------------------------------------
+    # Candidate selection
+    # -------------------------------------------------------------------------
 
-    # RULES 7/8 - human approval gate / final approval
-    decision, reason_code = apply_approval_gate(best, provisional_reason, config)
+    (
+        best,
+        provisional_reason,
+        checks,
+        model_recommended,
+        profit_map,
+        uplift,
+    ) = select_best_valid_discount(
+        request,
+        config,
+    )
+
+    checks = [
+        {
+            "check":
+                "model_availability",
+
+            "discount":
+                None,
+
+            "passed":
+                True,
+
+            "detail":
+                model_detail,
+        }
+    ] + checks
+
+    # -------------------------------------------------------------------------
+    # Human approval gate
+    # -------------------------------------------------------------------------
+
+    decision, reason_code = (
+        apply_approval_gate(
+            best,
+            provisional_reason,
+            config,
+        )
+    )
+
+    # -------------------------------------------------------------------------
+    # Audit
+    # -------------------------------------------------------------------------
 
     return build_audit_record(
-        request, config,
-        decision=decision, reason_code=reason_code, policy_selected_discount=best,
-        checks=checks, model_recommended_discount=model_recommended,
-        model_available=True, profit_map=profit_map, uplift=uplift,
+        request,
+        config,
+
+        decision=decision,
+
+        reason_code=reason_code,
+
+        policy_selected_discount=best,
+
+        checks=checks,
+
+        model_recommended_discount=
+            model_recommended,
+
+        model_available=True,
+
+        profit_map=profit_map,
+
+        uplift=uplift,
     )
